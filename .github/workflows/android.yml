@@ -1,4 +1,4 @@
-name: Android CI (build from ZIP)
+name: Android CI (from ZIP, robust)
 
 on:
   push:
@@ -13,53 +13,61 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install unzip
+      - name: Install tools
         run: |
           sudo apt-get update -y
           sudo apt-get install -y unzip tree
 
-      # Если есть архив, распакуем
       - name: Unzip Stikhi.zip (if present)
         run: |
           if [ -f Stikhi.zip ]; then
             rm -rf extracted
             unzip -o Stikhi.zip -d extracted
           fi
-          echo "Root:"
+          echo "== ROOT =="
           ls -la
-          echo "Extracted (if any):"
+          echo "== EXTRACTED (top 2 levels) =="
           [ -d extracted ] && tree -L 2 extracted || true
 
-      # Находим папку проекта, где лежит settings.gradle(.kts)
+      # Ищем корень по признакам settings.gradle(.kts) ИЛИ наличию app/build.gradle(.kts)
       - name: Detect project dir
         id: detect
         shell: bash
         run: |
           set -e
-          # Кандидаты: корень или распакованный архив
-          if [ -f settings.gradle.kts ] || [ -f settings.gradle ]; then
-            DIR="."
-          elif [ -d extracted ]; then
-            # 1) если единственная папка внутри extracted — возьмём её
-            TOP=$(find extracted -mindepth 1 -maxdepth 1 -type d | head -n1 || true)
-            # 2) найдём settings.gradle глубже, если не угадали
-            CAND=$(find extracted -type f -regex ".*/settings\.gradle\(\\.kts\)?" -printf "%h\n" | head -n1 || true)
-            if [ -n "$CAND" ]; then
-              DIR="$CAND"
-            elif [ -n "$TOP" ]; then
-              DIR="$TOP"
-            else
-              DIR="extracted"
-            fi
-          else
-            # последний шанс — поиск по репо
-            CAND=$(git ls-files | grep -E 'settings\.gradle(\.kts)?' | head -n1 || true)
-            DIR=$(dirname "$CAND")
-            [ -z "$DIR" ] && DIR="."
+          find_candidate () {
+            # settings.gradle(.kts)
+            CAND=$(find "$1" -type f -regex ".*/settings\.gradle(\.kts)?$" -printf "%h\n" | head -n1 || true)
+            if [ -n "$CAND" ]; then echo "$CAND"; return; fi
+            # app/build.gradle(.kts)
+            CAND=$(find "$1" -type f -regex ".*/app/build\.gradle(\.kts)?$" -printf "%h/..\n" | head -n1 | xargs -I{} realpath {} || true)
+            if [ -n "$CAND" ]; then echo "$CAND"; return; fi
+            echo ""
+          }
+
+          DIR=""
+          # 1) Корень репо
+          DIR=$(find_candidate ".")
+          # 2) В распакованном архиве
+          if [ -z "$DIR" ] && [ -d extracted ]; then
+            DIR=$(find_candidate "extracted")
           fi
+          # 3) Если внутри extracted только ОДНА папка — возьмём её
+          if [ -z "$DIR" ] && [ -d extracted ]; then
+            ONLY=$(find extracted -mindepth 1 -maxdepth 1 -type d | wc -l)
+            if [ "$ONLY" = "1" ]; then
+              DIR=$(find extracted -mindepth 1 -maxdepth 1 -type d | head -n1)
+            fi
+          fi
+
+          if [ -z "$DIR" ]; then
+            echo "Не удалось найти корень проекта. Пожалуйста, проверь содержимое ZIP." >&2
+            exit 1
+          fi
+
           echo "project_dir=$DIR" >> $GITHUB_OUTPUT
           echo "Using project_dir=$DIR"
-          echo "Tree of project_dir:"
+          echo "== PROJECT DIR TREE (top 2 levels) =="
           tree -L 2 "$DIR" || true
 
       - name: Set up Java 17
@@ -76,7 +84,7 @@ jobs:
           yes | sdkmanager --licenses
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
-      # Если есть gradlew — используем его, иначе — Gradle action
+      # Если есть gradlew — используем его
       - name: Build with Gradle Wrapper (if present)
         if: hashFiles(format('{0}/gradlew', steps.detect.outputs.project_dir)) != ''
         working-directory: ${{ steps.detect.outputs.project_dir }}
@@ -84,6 +92,7 @@ jobs:
           chmod +x gradlew
           ./gradlew --no-daemon assembleDebug
 
+      # Иначе — используем gradle action
       - name: Build with Gradle Action (fallback)
         if: hashFiles(format('{0}/gradlew', steps.detect.outputs.project_dir)) == ''
         uses: gradle/gradle-build-action@v3
