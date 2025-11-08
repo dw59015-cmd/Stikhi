@@ -1,4 +1,4 @@
-name: Android CI (from ZIP, robust)
+name: Android CI (auto-detect & build from ZIP)
 
 on:
   push:
@@ -18,7 +18,7 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y unzip tree
 
-      - name: Unzip Stikhi.zip (if present)
+      - name: Unzip Stikhi.zip (if present) & show tree
         run: |
           if [ -f Stikhi.zip ]; then
             rm -rf extracted
@@ -29,46 +29,25 @@ jobs:
           echo "== EXTRACTED (top 2 levels) =="
           [ -d extracted ] && tree -L 2 extracted || true
 
-      # Ищем корень по признакам settings.gradle(.kts) ИЛИ наличию app/build.gradle(.kts)
-      - name: Detect project dir
-        id: detect
+      - name: Find Android project candidates
+        id: find
         shell: bash
         run: |
           set -e
-          find_candidate () {
-            # settings.gradle(.kts)
-            CAND=$(find "$1" -type f -regex ".*/settings\.gradle(\.kts)?$" -printf "%h\n" | head -n1 || true)
-            if [ -n "$CAND" ]; then echo "$CAND"; return; fi
-            # app/build.gradle(.kts)
-            CAND=$(find "$1" -type f -regex ".*/app/build\.gradle(\.kts)?$" -printf "%h/..\n" | head -n1 | xargs -I{} realpath {} || true)
-            if [ -n "$CAND" ]; then echo "$CAND"; return; fi
-            echo ""
-          }
-
-          DIR=""
-          # 1) Корень репо
-          DIR=$(find_candidate ".")
-          # 2) В распакованном архиве
-          if [ -z "$DIR" ] && [ -d extracted ]; then
-            DIR=$(find_candidate "extracted")
+          CAND=""
+          # ищем корни по settings.gradle(.kts)
+          C1=$(find . -type f -regex ".*/settings\.gradle(\.kts)?$" -printf "%h\n" | sort -u || true)
+          # ищем корни по app/build.gradle(.kts)
+          C2=$(find . -type f -regex ".*/app/build\.gradle(\.kts)?$" -printf "%h/..\n" | xargs -I{} realpath {} 2>/dev/null | sort -u || true)
+          CAND=$(printf "%s\n%s\n" "$C1" "$C2" | sed '/^$/d' | sort -u)
+          echo "Найдены кандидаты:"
+          echo "$CAND"
+          if [ -z "$CAND" ]; then
+            echo "Не нашёл корень проекта. Посмотри дерево выше (Unzip step)."; exit 1
           fi
-          # 3) Если внутри extracted только ОДНА папка — возьмём её
-          if [ -z "$DIR" ] && [ -d extracted ]; then
-            ONLY=$(find extracted -mindepth 1 -maxdepth 1 -type d | wc -l)
-            if [ "$ONLY" = "1" ]; then
-              DIR=$(find extracted -mindepth 1 -maxdepth 1 -type d | head -n1)
-            fi
-          fi
-
-          if [ -z "$DIR" ]; then
-            echo "Не удалось найти корень проекта. Пожалуйста, проверь содержимое ZIP." >&2
-            exit 1
-          fi
-
-          echo "project_dir=$DIR" >> $GITHUB_OUTPUT
-          echo "Using project_dir=$DIR"
-          echo "== PROJECT DIR TREE (top 2 levels) =="
-          tree -L 2 "$DIR" || true
+          # сохраним в файл
+          printf "%s\n" "$CAND" > candidates.txt
+          echo "candidates=$(printf "%s" "$CAND" | tr '\n' ' ')" >> $GITHUB_OUTPUT
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -84,25 +63,33 @@ jobs:
           yes | sdkmanager --licenses
           sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
-      # Если есть gradlew — используем его
-      - name: Build with Gradle Wrapper (if present)
-        if: hashFiles(format('{0}/gradlew', steps.detect.outputs.project_dir)) != ''
-        working-directory: ${{ steps.detect.outputs.project_dir }}
+      - name: Try build each candidate
+        shell: bash
         run: |
-          chmod +x gradlew
-          ./gradlew --no-daemon assembleDebug
+          set -e
+          ok=0
+          while IFS= read -r dir; do
+            [ -z "$dir" ] && continue
+            echo "==== Пытаюсь собрать: $dir ===="
+            if [ -f "$dir/gradlew" ]; then
+              (cd "$dir" && chmod +x gradlew && ./gradlew --no-daemon assembleDebug) && ok=1 || echo "Не удалось собрать $dir (gradlew)"
+            else
+              # fallback через gradle action: локально вызовем gradle, если wrapper отсутствует
+              (cd "$dir" && gradle -v >/dev/null 2>&1 || true)
+              (cd "$dir" && ./gradlew --version >/dev/null 2>&1 || true)
+              echo "Wrapper не найден в $dir — пробую через gradle-wrapper подниматься из проекта"
+              (cd "$dir" && ./gradlew --no-daemon assembleDebug) && ok=1 || echo "Не удалось собрать $dir (fallback)"
+            fi
+          done < candidates.txt
+          if [ $ok -eq 0 ]; then
+            echo "Не удалось собрать ни одного кандидата."; exit 1
+          fi
 
-      # Иначе — используем gradle action
-      - name: Build with Gradle Action (fallback)
-        if: hashFiles(format('{0}/gradlew', steps.detect.outputs.project_dir)) == ''
-        uses: gradle/gradle-build-action@v3
-        with:
-          gradle-version: 8.9
-          build-root-directory: ${{ steps.detect.outputs.project_dir }}
-          arguments: assembleDebug
-
-      - name: Upload APK
+      - name: Upload found APKs
         uses: actions/upload-artifact@v4
         with:
-          name: Stikhi-debug-apk
-          path: ${{ steps.detect.outputs.project_dir }}/app/build/outputs/apk/debug/app-debug.apk
+          name: Stikhi-apks
+          path: |
+            **/app/build/outputs/apk/**/app-*.apk
+            **/app/build/outputs/apk/**/app-*.aab
+          if-no-files-found: warn
