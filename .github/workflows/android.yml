@@ -25,7 +25,7 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses
 
-      # --- Pick project archive by priority ---
+      # --- Choose project ZIP by priority ---
       - name: Select project ZIP
         id: pick
         run: |
@@ -62,7 +62,7 @@ jobs:
           echo "Detected root: $ROOT"
           find "$ROOT" -maxdepth 2 -type f | sort
 
-      # --- Ensure AndroidX flags and sane JVM options ---
+      # --- Ensure gradle.properties ---
       - name: Ensure gradle.properties (AndroidX, JVM)
         run: |
           set -e
@@ -87,7 +87,6 @@ jobs:
         run: |
           set -e
           ROOT="${{ steps.detect.outputs.root }}"
-          # root build file
           if [ -f "$ROOT/build.gradle.kts" ]; then
             if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/build.gradle.kts"; then
               sed -i '0,/plugins *{/{s//plugins {\n    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false/}' "$ROOT/build.gradle.kts"
@@ -99,13 +98,11 @@ jobs:
               echo "Patched root build.gradle with Compose plugin"
             fi
           fi
-          # app module build file
           if [ -f "$ROOT/app/build.gradle.kts" ]; then
             if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/app/build.gradle.kts"; then
               sed -i '0,/plugins *{/{s//plugins {\n    id("org.jetbrains.kotlin.plugin.compose")/}' "$ROOT/app/build.gradle.kts"
               echo "Patched app/build.gradle.kts with Compose plugin"
             fi
-            # remove legacy composeOptions block (Kotlin 2.x manages it)
             perl -0777 -pe 's/composeOptions\s*\{[^}]*\}//s' -i "$ROOT/app/build.gradle.kts" || true
           elif [ -f "$ROOT/app/build.gradle" ]; then
             if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/app/build.gradle"; then
@@ -114,14 +111,13 @@ jobs:
             fi
           fi
 
-      # --- Ensure Material Components dependency for Theme.Material3.* in XML ---
+      # --- Ensure Material Components (Theme.Material3.* in XML) ---
       - name: Ensure Material Components dependency (Theme.Material3)
         run: |
           set -e
           ROOT="${{ steps.detect.outputs.root }}"
           APP_KTS="$ROOT/app/build.gradle.kts"
           APP_GROOVY="$ROOT/app/build.gradle"
-
           insert_dep_kts() {
             local f="$1"
             if ! grep -q 'com.google.android.material:material' "$f"; then
@@ -131,7 +127,6 @@ jobs:
               echo "Material Components already present in $f"
             fi
           }
-
           insert_dep_groovy() {
             local f="$1"
             if ! grep -q 'com.google.android.material:material' "$f"; then
@@ -141,16 +136,67 @@ jobs:
               echo "Material Components already present in $f"
             fi
           }
-
           if [ -f "$APP_KTS" ]; then
-            insert_dep_kts "$APP_KTS"
-            head -n 160 "$APP_KTS" || true
+            insert_dep_kts "$APP_KTS"; head -n 160 "$APP_KTS" || true
           elif [ -f "$APP_GROOVY" ]; then
-            insert_dep_groovy "$APP_GROOVY"
-            head -n 160 "$APP_GROOVY" || true
+            insert_dep_groovy "$APP_GROOVY"; head -n 160 "$APP_GROOVY" || true
           else
             echo "app build.gradle* not found"; exit 1
           fi
+
+      # --- Auto-create launcher icons if missing ---
+      - name: Ensure launcher icons (ic_launcher)
+        run: |
+          set -e
+          ROOT="${{ steps.detect.outputs.root }}"
+          RES="$ROOT/app/src/main/res"
+          if [ ! -d "$RES" ]; then
+            echo "No res/ folder at $RES"; exit 1
+          fi
+          MIP="$RES/mipmap-anydpi-v26"
+          DRW="$RES/drawable"
+          VAL="$RES/values"
+          mkdir -p "$MIP" "$DRW" "$VAL"
+          if [ ! -f "$MIP/ic_launcher.xml" ]; then
+            cat > "$MIP/ic_launcher.xml" << 'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background"/>
+    <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+</adaptive-icon>
+EOF
+          fi
+          if [ ! -f "$MIP/ic_launcher_round.xml" ]; then
+            cat > "$MIP/ic_launcher_round.xml" << 'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ic_launcher_background"/>
+    <foreground android:drawable="@drawable/ic_launcher_foreground"/>
+</adaptive-icon>
+EOF
+          fi
+          if [ ! -f "$DRW/ic_launcher_foreground.xml" ]; then
+            cat > "$DRW/ic_launcher_foreground.xml" << 'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF" android:fillAlpha="0.9"
+          android:pathData="M20,30h68a8,8 0 0 1 8,8v40a8,8 0 0 1 -8,8H20a8,8 0 0 1 -8,-8V38a8,8 0 0 1 8,-8z"/>
+    <path android:fillColor="#3F51B5" android:pathData="M28,38h52a4,4 0 0 1 4,4v24a12,12 0 0 1 -12,12H28z"/>
+    <path android:fillColor="#FFFFFF" android:pathData="M36,48h36v4H36zM36,56h28v4H36zM36,64h22v4H36z"/>
+    <path android:fillColor="#FF4081" android:pathData="M70,28c6,8 10,14 10,18 0,6 -6,10 -10,10 -4,0 -10,-4 -10,-10 0,-4 4,-10 10,-18z"/>
+</vector>
+EOF
+          fi
+          if [ ! -f "$VAL/ic_launcher_background.xml" ]; then
+            cat > "$VAL/ic_launcher_background.xml" << 'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#121212</color>
+</resources>
+EOF
+          fi
+          echo "Launcher icon resources ensured."
 
       - name: Build APK (release)
         working-directory: ${{ steps.detect.outputs.root }}
