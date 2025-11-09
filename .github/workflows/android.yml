@@ -26,12 +26,13 @@ jobs:
           fi
           echo "Using $(cat $GITHUB_OUTPUT)"
 
-      - name: Unzip ZIP to workspace
-        run: |
-          rm -rf repo && mkdir repo
-          unzip -q "${{ steps.pickzip.outputs.zip }}" -d repo
-          echo "Top-level after unzip:"
-          ls -la repo
+      - name: Unzip latest ZIP
+      run: |
+        rm -rf repo && mkdir repo
+        ZIP=$(ls -t *.zip | head -n1)
+        echo "📦 Используется ZIP: $ZIP"
+        unzip -o "$ZIP" -d repo
+        ls -la repo
 
       - name: Detect Gradle project root
         id: detect
