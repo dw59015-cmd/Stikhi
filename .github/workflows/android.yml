@@ -1,4 +1,4 @@
-name: Android CI (gradle-direct)
+name: Android CI (Stikhi v1.2 direct build)
 
 on:
   push:
@@ -10,55 +10,36 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout
+      uses: actions/checkout@v4
 
-      - name: Unzip Stikhi.zip (if present)
-        shell: bash
-        run: |
-          if [ -f Stikhi.zip ]; then
-            rm -rf __zip && mkdir __zip
-            unzip -q Stikhi.zip -d __zip
-            # если внутри zip один верхний каталог — поднимаем его содержимое в корень
-            TOPDIRS=$(find __zip -mindepth 1 -maxdepth 1 -type d | wc -l)
-            if [ "$TOPDIRS" = "1" ]; then
-              TOP=$(find __zip -mindepth 1 -maxdepth 1 -type d)
-              shopt -s dotglob && mv "$TOP"/* . && shopt -u dotglob
-            fi
-          fi
-          ls -la
+    - name: Set up Java 17
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '17'
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
+    - name: Set up Android SDK
+      uses: android-actions/setup-android@v3
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+    - name: Accept Android SDK licenses
+      run: yes | sdkmanager --licenses
 
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses
+    - name: Unzip Stikhi_v1_2.zip to repo root
+      run: |
+        unzip -o Stikhi_v1_2.zip -d .
+        ls -la
+        find . -maxdepth 2 -type f -name "build.gradle.kts" -o -name "settings.gradle.kts"
 
-      # Используем gradle напрямую (без wrapper), подходящий для AGP 8.5.x
-      - name: Set up Gradle 8.7
-        uses: gradle/gradle-build-action@v2
-        with:
-          gradle-version: 8.7
+    # Строим через системный gradle (без wrapper), чтобы не было ошибки GradleWrapperMain
+    - name: Build APK (release)
+      run: |
+        gradle -v
+        gradle :app:assembleRelease --no-daemon
 
-      - name: Build APK (release)
-        shell: bash
-        run: |
-          # Пытаемся через wrapper, если он есть; иначе — через системный gradle
-          if [ -x ./gradlew ]; then
-            ./gradlew :app:assembleRelease --no-daemon
-          else
-            gradle :app:assembleRelease --no-daemon
-          fi
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Stikhi-APK
-          path: app/build/outputs/apk/release/*.apk
-          if-no-files-found: warn
+    - name: Upload APK artifact
+      if: success()
+      uses: actions/upload-artifact@v4
+      with:
+        name: Stikhi-release-apk
+        path: app/build/outputs/apk/release/*.apk
