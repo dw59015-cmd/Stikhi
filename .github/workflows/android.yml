@@ -25,15 +25,30 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses
 
-      - name: Unzip latest ZIP
+      # --- Выбор архива проекта (приоритет: v1_3_androidx → v1_3_patched → v1_2) ---
+      - name: Select project ZIP
+        id: pick
+        run: |
+          set -e
+          if [ -f "Stikhi_v1_3_androidx.zip" ]; then
+            echo "zip=Stikhi_v1_3_androidx.zip" >> "$GITHUB_OUTPUT"
+          elif [ -f "Stikhi_v1_3_patched.zip" ]; then
+            echo "zip=Stikhi_v1_3_patched.zip" >> "$GITHUB_OUTPUT"
+          elif [ -f "Stikhi_v1_2.zip" ]; then
+            echo "zip=Stikhi_v1_2.zip" >> "$GITHUB_OUTPUT"
+          else
+            echo "ZIP archive not found in repo root"; ls -la; exit 1
+          fi
+          echo "Chosen ZIP: $(sed -n 's/^zip=//p' $GITHUB_OUTPUT)"
+
+      - name: Unzip selected ZIP
         run: |
           set -e
           rm -rf repo
           mkdir repo
-          ZIP=$(ls -t *.zip | head -n1)
-          echo "Using ZIP: $ZIP"
-          unzip -o "$ZIP" -d repo
-          ls -la repo
+          unzip -o "${{ steps.pick.outputs.zip }}" -d repo
+          echo "Contents of repo/:"
+          find repo -maxdepth 2 -type f | sort
 
       - name: Detect Gradle project root
         id: detect
@@ -41,20 +56,19 @@ jobs:
           set -e
           ROOT=$(dirname "$(find repo -maxdepth 2 -type f -name 'settings.gradle*' | head -n1)")
           if [ -z "$ROOT" ]; then
-            echo "settings.gradle(.kts) not found"
-            exit 1
+            echo "settings.gradle(.kts) not found"; exit 1
           fi
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "Detected root: $ROOT"
           find "$ROOT" -maxdepth 2 -type f | sort
 
-      - name: Ensure gradle.properties has AndroidX flags
+      # --- Страховка AndroidX и Gradle настроек ---
+      - name: Ensure gradle.properties (AndroidX, JVM)
         run: |
           set -e
           ROOT="${{ steps.detect.outputs.root }}"
           GP="$ROOT/gradle.properties"
           if [ ! -f "$GP" ]; then
-            echo "Creating $GP"
             {
               echo "android.useAndroidX=true"
               echo "android.enableJetifier=true"
@@ -62,10 +76,46 @@ jobs:
               echo "kotlin.code.style=official"
               echo "org.gradle.warning.mode=all"
             } > "$GP"
+            echo "Created gradle.properties"
           else
-            echo "Existing gradle.properties:"
+            echo "gradle.properties exists:"
             cat "$GP"
           fi
+
+      # --- Патч Compose Compiler plugin для Kotlin 2.x (если включён compose) ---
+      - name: Patch Compose plugin if missing
+        run: |
+          set -e
+          ROOT="${{ steps.detect.outputs.root }}"
+          # Корневой gradle
+          if [ -f "$ROOT/build.gradle.kts" ]; then
+            if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/build.gradle.kts"; then
+              sed -i '0,/plugins *{/{s//plugins {\n    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false/}' "$ROOT/build.gradle.kts"
+              echo "Patched root build.gradle.kts with Compose plugin"
+            fi
+          elif [ -f "$ROOT/build.gradle" ]; then
+            if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/build.gradle"; then
+              sed -i "0,/plugins *{/{s//plugins {\\n    id 'org.jetbrains.kotlin.plugin.compose' version '2.0.21' apply false/}" "$ROOT/build.gradle"
+              echo "Patched root build.gradle with Compose plugin"
+            fi
+          fi
+          # Модуль app
+          if [ -f "$ROOT/app/build.gradle.kts" ]; then
+            if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/app/build.gradle.kts"; then
+              sed -i '0,/plugins *{/{s//plugins {\n    id("org.jetbrains.kotlin.plugin.compose")/}' "$ROOT/app/build.gradle.kts"
+              echo "Patched app/build.gradle.kts with Compose plugin"
+            fi
+            # Удалим устаревший composeOptions блок (не обязателен при Kotlin 2.x)
+            perl -0777 -pe 's/composeOptions\s*\{[^}]*\}//s' -i "$ROOT/app/build.gradle.kts" || true
+          elif [ -f "$ROOT/app/build.gradle" ]; then
+            if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/app/build.gradle"; then
+              sed -i "0,/plugins *{/{s//plugins {\\n    id 'org.jetbrains.kotlin.plugin.compose'/}" "$ROOT/app/build.gradle"
+              echo "Patched app/build.gradle with Compose plugin"
+            fi
+          fi
+          echo "Show build files headers:"
+          head -n 60 "$ROOT/build.gradle.kts" 2>/dev/null || true
+          head -n 60 "$ROOT/app/build.gradle.kts" 2>/dev/null || true
 
       - name: Build APK (release)
         working-directory: ${{ steps.detect.outputs.root }}
