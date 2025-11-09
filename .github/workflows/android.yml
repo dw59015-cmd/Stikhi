@@ -1,4 +1,4 @@
-name: Android CI
+name: Android CI (inspect→build)
 
 on:
   push:
@@ -6,200 +6,127 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  inspect:
     runs-on: ubuntu-latest
-
+    outputs:
+      root: ${{ steps.detect.outputs.root }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Accept Android SDK licenses
-        run: yes | sdkmanager --licenses
-
-      # 1) Выбор ZIP (с приоритетом на последний правильный)
-      - name: Select project ZIP
+      - name: Pick ZIP by priority
         id: pick
         run: |
           set -e
-          if [ -f "Stikhi_v1_3_androidx.zip" ]; then
-            echo "zip=Stikhi_v1_3_androidx.zip" >> "$GITHUB_OUTPUT"
-          elif [ -f "Stikhi_v1_3_patched.zip" ]; then
-            echo "zip=Stikhi_v1_3_patched.zip" >> "$GITHUB_OUTPUT"
-          elif [ -f "Stikhi_v1_2.zip" ]; then
-            echo "zip=Stikhi_v1_2.zip" >> "$GITHUB_OUTPUT"
-          else
-            echo "No project ZIP found in repo root"
-            ls -la
-            exit 1
-          fi
-          echo "Chosen: $(sed -n 's/^zip=//p' $GITHUB_OUTPUT)"
+          for Z in Stikhi_v1_3_androidx.zip Stikhi_v1_3_patched.zip Stikhi_v1_2.zip; do
+            [ -f "$Z" ] && echo "zip=$Z" >> "$GITHUB_OUTPUT" && echo "Chosen $Z" && exit 0
+          done
+          echo "No ZIP"; ls -la; exit 1
 
-      # 2) Распаковка
-      - name: Unzip selected ZIP
+      - name: Unzip
         run: |
           set -e
-          rm -rf repo
-          mkdir repo
+          rm -rf repo && mkdir repo
           unzip -o "${{ steps.pick.outputs.zip }}" -d repo
-          echo "repo/ content:"
-          find repo -maxdepth 2 -type f | sort
+          echo "Top of repo/:"; find repo -maxdepth 2 -type f | sort
 
-      # 3) Поиск корня Gradle-проекта
-      - name: Detect Gradle project root
+      - name: Detect Gradle root
         id: detect
         run: |
           set -e
           ROOT="$(dirname "$(find repo -maxdepth 2 -type f -name 'settings.gradle*' | head -n1)")"
-          if [ -z "$ROOT" ]; then
-            echo "settings.gradle(.kts) not found"
-            exit 1
-          fi
+          [ -z "$ROOT" ] && echo "settings.gradle* not found" && exit 1
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "Detected root: $ROOT"
 
-      # 4) gradle.properties: AndroidX + JVM
-      - name: Ensure gradle.properties (AndroidX, JVM)
+      - name: Ensure gradle.properties, Material, icons
         run: |
           set -e
-          ROOT="${{ steps.detect.outputs.root }}"
+          ROOT='${{ steps.detect.outputs.root }}'
           GP="$ROOT/gradle.properties"
           if [ ! -f "$GP" ]; then
-            {
-              echo "android.useAndroidX=true"
-              echo "android.enableJetifier=true"
-              echo "org.gradle.jvmargs=-Xmx3g -Dkotlin.daemon.jvm.options=-Xmx1g"
-              echo "kotlin.code.style=official"
-              echo "org.gradle.warning.mode=all"
-            } > "$GP"
+            printf '%s\n' \
+              'android.useAndroidX=true' \
+              'android.enableJetifier=true' \
+              'org.gradle.jvmargs=-Xmx3g -Dkotlin.daemon.jvm.options=-Xmx1g' \
+              'kotlin.code.style=official' \
+              'org.gradle.warning.mode=all' > "$GP"
             echo "Created $GP"
+          fi
+
+          APPKTS="$ROOT/app/build.gradle.kts"; APPGR="$ROOT/app/build.gradle"
+          if [ -f "$APPKTS" ]; then
+            grep -q 'com.google.android.material:material' "$APPKTS" || awk '/dependencies *\{/{print;print "    implementation(\"com.google.android.material:material:1.12.0\")";next}1' "$APPKTS" > "$APPKTS.tmp" && mv "$APPKTS.tmp" "$APPKTS"
+          elif [ -f "$APPGR" ]; then
+            grep -q 'com.google.android.material:material' "$APPGR" || awk '/dependencies *\{/{print;print "    implementation '\''com.google.android.material:material:1.12.0'\''";next}1' "$APPGR" > "$APPGR.tmp" && mv "$APPGR.tmp" "$APPGR"
           else
-            echo "Existing $GP:"
-            cat "$GP"
+            echo "app/build.gradle* not found"; exit 1
           fi
 
-      # 5) Подключить Compose Compiler plugin (Kotlin 2.x) при необходимости
-      - name: Patch Compose plugin if missing
-        run: |
-          set -e
-          ROOT="${{ steps.detect.outputs.root }}"
-          if [ -f "$ROOT/build.gradle.kts" ]; then
-            if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/build.gradle.kts"; then
-              awk 'NR==1{print} NR==2{print "    id(\"org.jetbrains.kotlin.plugin.compose\") version \"2.0.21\" apply false"} NR>2{print}' "$ROOT/build.gradle.kts" > "$ROOT/build.gradle.kts.tmp" && mv "$ROOT/build.gradle.kts.tmp" "$ROOT/build.gradle.kts"
-              echo "Patched root build.gradle.kts"
-            fi
-          elif [ -f "$ROOT/build.gradle" ]; then
-            if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/build.gradle"; then
-              awk 'NR==1{print} NR==2{print "    id '\''org.jetbrains.kotlin.plugin.compose'\'' version '\''2.0.21'\'' apply false"} NR>2{print}' "$ROOT/build.gradle" > "$ROOT/build.gradle.tmp" && mv "$ROOT/build.gradle.tmp" "$ROOT/build.gradle"
-              echo "Patched root build.gradle"
-            fi
-          fi
-
-          if [ -f "$ROOT/app/build.gradle.kts" ]; then
-            if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/app/build.gradle.kts"; then
-              awk 'NR==1{print} NR==2{print "    id(\"org.jetbrains.kotlin.plugin.compose\")"} NR>2{print}' "$ROOT/app/build.gradle.kts" > "$ROOT/app/build.gradle.kts.tmp" && mv "$ROOT/app/build.gradle.kts.tmp" "$ROOT/app/build.gradle.kts"
-              echo "Patched app/build.gradle.kts"
-            fi
-            # удалить composeOptions { ... } если есть (Kotlin 2.x сам управляет)
-            perl -0777 -pe 's/composeOptions\s*\{[^}]*\}//s' -i "$ROOT/app/build.gradle.kts" || true
-          elif [ -f "$ROOT/app/build.gradle" ]; then
-            if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/app/build.gradle"; then
-              awk 'NR==1{print} NR==2{print "    id '\''org.jetbrains.kotlin.plugin.compose'\''"} NR>2{print}' "$ROOT/app/build.gradle" > "$ROOT/app/build.gradle.tmp" && mv "$ROOT/app/build.gradle.tmp" "$ROOT/app/build.gradle"
-              echo "Patched app/build.gradle"
-            fi
-          fi
-
-      # 6) Добавить Material Components (нужен для Theme.Material3.* в XML)
-      - name: Ensure Material Components dependency
-        run: |
-          set -e
-          ROOT="${{ steps.detect.outputs.root }}"
-          if [ -f "$ROOT/app/build.gradle.kts" ]; then
-            if ! grep -q 'com.google.android.material:material' "$ROOT/app/build.gradle.kts"; then
-              awk '/dependencies *\{/{print; print "    implementation(\"com.google.android.material:material:1.12.0\")"; next}1' "$ROOT/app/build.gradle.kts" > "$ROOT/app/build.gradle.kts.tmp" && mv "$ROOT/app/build.gradle.kts.tmp" "$ROOT/app/build.gradle.kts"
-              echo "Added material to build.gradle.kts"
-            fi
-          elif [ -f "$ROOT/app/build.gradle" ]; then
-            if ! grep -q 'com.google.android.material:material' "$ROOT/app/build.gradle"; then
-              awk '/dependencies *\{/{print; print "    implementation '\''com.google.android.material:material:1.12.0'\''"; next}1' "$ROOT/app/build.gradle" > "$ROOT/app/build.gradle.tmp" && mv "$ROOT/app/build.gradle.tmp" "$ROOT/app/build.gradle"
-              echo "Added material to build.gradle"
-            fi
-          else
-            echo "app build.gradle* not found"
-            exit 1
-          fi
-
-      # 7) Создать иконки лаунчера, если отсутствуют (без heredoc)
-      - name: Ensure launcher icons (ic_launcher)
-        run: |
-          set -e
-          ROOT="${{ steps.detect.outputs.root }}"
           RES="$ROOT/app/src/main/res"
           mkdir -p "$RES/mipmap-anydpi-v26" "$RES/drawable" "$RES/values"
+          [ -f "$RES/mipmap-anydpi-v26/ic_launcher.xml" ] || printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' '  <background android:drawable="@color/ic_launcher_background"/>' '  <foreground android:drawable="@drawable/ic_launcher_foreground"/>' '</adaptive-icon>' > "$RES/mipmap-anydpi-v26/ic_launcher.xml"
+          [ -f "$RES/mipmap-anydpi-v26/ic_launcher_round.xml" ] || cp "$RES/mipmap-anydpi-v26/ic_launcher.xml" "$RES/mipmap-anydpi-v26/ic_launcher_round.xml"
+          [ -f "$RES/drawable/ic_launcher_foreground.xml" ] || printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">' '  <path android:fillColor="#FFFFFF" android:fillAlpha="0.9" android:pathData="M20,30h68a8,8 0 0 1 8,8v40a8,8 0 0 1 -8,8H20a8,8 0 0 1 -8,-8V38a8,8 0 0 1 8,-8z"/>' '  <path android:fillColor="#3F51B5" android:pathData="M28,38h52a4,4 0 0 1 4,4v24a12,12 0 0 1 -12,12H28z"/>' '  <path android:fillColor="#FFFFFF" android:pathData="M36,48h36v4H36zM36,56h28v4H36zM36,64h22v4H36z"/>' '  <path android:fillColor="#FF4081" android:pathData="M70,28c6,8 10,14 10,18 0,6 -6,10 -10,10 -4,0 -10,-4 -10,-10 0,-4 4,-10 10,-18z"/>' '</vector>' > "$RES/drawable/ic_launcher_foreground.xml"
+          [ -f "$RES/values/ic_launcher_background.xml" ] || printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<resources>' '  <color name="ic_launcher_background">#121212</color>' '</resources>' > "$RES/values/ic_launcher_background.xml"
 
-          # ic_launcher.xml
-          if [ ! -f "$RES/mipmap-anydpi-v26/ic_launcher.xml" ]; then
-            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
-              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
-              '    <background android:drawable="@color/ic_launcher_background"/>' \
-              '    <foreground android:drawable="@drawable/ic_launcher_foreground"/>' \
-              '</adaptive-icon>' > "$RES/mipmap-anydpi-v26/ic_launcher.xml"
+          echo "Inspection OK."
+
+  build:
+    needs: inspect
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Re-unzip selected ZIP
+        run: |
+          set -e
+          for Z in Stikhi_v1_3_androidx.zip Stikhi_v1_3_patched.zip Stikhi_v1_2.zip; do
+            [ -f "$Z" ] && echo "Using $Z" && rm -rf repo && mkdir repo && unzip -o "$Z" -d repo && break
+          done
+
+      - name: Set up Java 17 & Android SDK
+        uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: "17" }
+      - uses: android-actions/setup-android@v3
+      - run: yes | sdkmanager --licenses
+
+      - name: Detect root
+        id: detect
+        run: |
+          ROOT="$(dirname "$(find repo -maxdepth 2 -type f -name 'settings.gradle*' | head -n1)")"
+          [ -z "$ROOT" ] && echo "settings.gradle* not found" && exit 1
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "Root: $ROOT"
+
+      - name: Ensure props/material/icons again (idempotent)
+        run: |
+          set -e
+          ROOT='${{ steps.detect.outputs.root }}'
+          GP="$ROOT/gradle.properties"
+          grep -q 'android.useAndroidX=true' "$GP" 2>/dev/null || echo 'android.useAndroidX=true' >> "$GP"
+          grep -q 'android.enableJetifier=true' "$GP" 2>/dev/null || echo 'android.enableJetifier=true' >> "$GP"
+
+          APPKTS="$ROOT/app/build.gradle.kts"; APPGR="$ROOT/app/build.gradle"
+          if [ -f "$APPKTS" ]; then
+            grep -q 'com.google.android.material:material' "$APPKTS" || awk '/dependencies *\{/{print;print "    implementation(\"com.google.android.material:material:1.12.0\")";next}1' "$APPKTS" > "$APPKTS.tmp" && mv "$APPKTS.tmp" "$APPKTS"
+          elif [ -f "$APPGR" ]; then
+            grep -q 'com.google.android.material:material' "$APPGR" || awk '/dependencies *\{/{print;print "    implementation '\''com.google.android.material:material:1.12.0'\''";next}1' "$APPGR" > "$APPGR.tmp" && mv "$APPGR.tmp" "$APPGR"
           fi
 
-          # ic_launcher_round.xml
-          if [ ! -f "$RES/mipmap-anydpi-v26/ic_launcher_round.xml" ]; then
-            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
-              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
-              '    <background android:drawable="@color/ic_launcher_background"/>' \
-              '    <foreground android:drawable="@drawable/ic_launcher_foreground"/>' \
-              '</adaptive-icon>' > "$RES/mipmap-anydpi-v26/ic_launcher_round.xml"
-          fi
+          RES="$ROOT/app/src/main/res"
+          mkdir -p "$RES/mipmap-anydpi-v26" "$RES/drawable" "$RES/values"
+          [ -f "$RES/mipmap-anydpi-v26/ic_launcher.xml" ] || printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' '  <background android:drawable="@color/ic_launcher_background"/>' '  <foreground android:drawable="@drawable/ic_launcher_foreground"/>' '</adaptive-icon>' > "$RES/mipmap-anydpi-v26/ic_launcher.xml"
+          [ -f "$RES/mipmap-anydpi-v26/ic_launcher_round.xml" ] || cp "$RES/mipmap-anydpi-v26/ic_launcher.xml" "$RES/mipmap-anydpi-v26/ic_launcher_round.xml"
+          [ -f "$RES/drawable/ic_launcher_foreground.xml" ] || printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">' '  <path android:fillColor="#FFFFFF" android:fillAlpha="0.9" android:pathData="M20,30h68a8,8 0 0 1 8,8v40a8,8 0 0 1 -8,8H20a8,8 0 0 1 -8,-8V38a8,8 0 0 1 8,-8z"/>' '  <path android:fillColor="#3F51B5" android:pathData="M28,38h52a4,4 0 0 1 4,4v24a12,12 0 0 1 -12,12H28z"/>' '  <path android:fillColor="#FFFFFF" android:pathData="M36,48h36v4H36zM36,56h28v4H36zM36,64h22v4H36z"/>' '  <path android:fillColor="#FF4081" android:pathData="M70,28c6,8 10,14 10,18 0,6 -6,10 -10,10 -4,0 -10,-4 -10,-10 0,-4 4,-10 10,-18z"/>' '</vector>' > "$RES/drawable/ic_launcher_foreground.xml"
+          [ -f "$RES/values/ic_launcher_background.xml" ] || printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<resources>' '  <color name="ic_launcher_background">#121212</color>' '</resources>' > "$RES/values/ic_launcher_background.xml"
 
-          # ic_launcher_foreground.xml (простой вектор)
-          if [ ! -f "$RES/drawable/ic_launcher_foreground.xml" ]; then
-            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
-              '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">' \
-              '  <path android:fillColor="#FFFFFF" android:fillAlpha="0.9" android:pathData="M20,30h68a8,8 0 0 1 8,8v40a8,8 0 0 1 -8,8H20a8,8 0 0 1 -8,-8V38a8,8 0 0 1 8,-8z"/>' \
-              '  <path android:fillColor="#3F51B5" android:pathData="M28,38h52a4,4 0 0 1 4,4v24a12,12 0 0 1 -12,12H28z"/>' \
-              '  <path android:fillColor="#FFFFFF" android:pathData="M36,48h36v4H36zM36,56h28v4H36zM36,64h22v4H36z"/>' \
-              '  <path android:fillColor="#FF4081" android:pathData="M70,28c6,8 10,14 10,18 0,6 -6,10 -10,10 -4,0 -10,-4 -10,-10 0,-4 4,-10 10,-18z"/>' \
-              '</vector>' > "$RES/drawable/ic_launcher_foreground.xml"
-          fi
-
-          # ic_launcher_background.xml (цвет)
-          if [ ! -f "$RES/values/ic_launcher_background.xml" ]; then
-            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
-              '<resources>' \
-              '  <color name="ic_launcher_background">#121212</color>' \
-              '</resources>' > "$RES/values/ic_launcher_background.xml"
-          fi
-
-          echo "Launcher icon resources ensured."
-
-      # 8) Сборка
-      - name: Build APK (release)
+      - name: Build release APK
         working-directory: ${{ steps.detect.outputs.root }}
         run: |
           set -e
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            ./gradlew :app:assembleRelease --no-daemon
-          else
-            gradle :app:assembleRelease --no-daemon
-          fi
+          if [ -f "./gradlew" ]; then chmod +x ./gradlew && ./gradlew :app:assembleRelease --no-daemon; else gradle :app:assembleRelease --no-daemon; fi
 
-      # 9) Артефакт
-      - name: Upload APK artifact
-        if: success()
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: Stikhi-release-apk
           path: ${{ steps.detect.outputs.root }}/app/build/outputs/apk/release/*.apk
