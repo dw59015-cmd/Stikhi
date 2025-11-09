@@ -2,7 +2,7 @@ name: Android CI
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
 
 jobs:
@@ -17,7 +17,7 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
@@ -25,7 +25,7 @@ jobs:
       - name: Accept Android SDK licenses
         run: yes | sdkmanager --licenses
 
-      # --- Choose project ZIP by priority ---
+      # 1) Выбор ZIP (с приоритетом на последний правильный)
       - name: Select project ZIP
         id: pick
         run: |
@@ -37,32 +37,36 @@ jobs:
           elif [ -f "Stikhi_v1_2.zip" ]; then
             echo "zip=Stikhi_v1_2.zip" >> "$GITHUB_OUTPUT"
           else
-            echo "ZIP archive not found in repo root"; ls -la; exit 1
+            echo "No project ZIP found in repo root"
+            ls -la
+            exit 1
           fi
-          echo "Chosen ZIP: $(sed -n 's/^zip=//p' $GITHUB_OUTPUT)"
+          echo "Chosen: $(sed -n 's/^zip=//p' $GITHUB_OUTPUT)"
 
+      # 2) Распаковка
       - name: Unzip selected ZIP
         run: |
           set -e
           rm -rf repo
           mkdir repo
           unzip -o "${{ steps.pick.outputs.zip }}" -d repo
-          echo "Contents of repo/:"
+          echo "repo/ content:"
           find repo -maxdepth 2 -type f | sort
 
+      # 3) Поиск корня Gradle-проекта
       - name: Detect Gradle project root
         id: detect
         run: |
           set -e
-          ROOT=$(dirname "$(find repo -maxdepth 2 -type f -name 'settings.gradle*' | head -n1)")
+          ROOT="$(dirname "$(find repo -maxdepth 2 -type f -name 'settings.gradle*' | head -n1)")"
           if [ -z "$ROOT" ]; then
-            echo "settings.gradle(.kts) not found"; exit 1
+            echo "settings.gradle(.kts) not found"
+            exit 1
           fi
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "Detected root: $ROOT"
-          find "$ROOT" -maxdepth 2 -type f | sort
 
-      # --- Ensure gradle.properties ---
+      # 4) gradle.properties: AndroidX + JVM
       - name: Ensure gradle.properties (AndroidX, JVM)
         run: |
           set -e
@@ -76,128 +80,111 @@ jobs:
               echo "kotlin.code.style=official"
               echo "org.gradle.warning.mode=all"
             } > "$GP"
-            echo "Created gradle.properties"
+            echo "Created $GP"
           else
-            echo "Existing gradle.properties:"
+            echo "Existing $GP:"
             cat "$GP"
           fi
 
-      # --- Patch Compose plugin for Kotlin 2.x if missing ---
+      # 5) Подключить Compose Compiler plugin (Kotlin 2.x) при необходимости
       - name: Patch Compose plugin if missing
         run: |
           set -e
           ROOT="${{ steps.detect.outputs.root }}"
           if [ -f "$ROOT/build.gradle.kts" ]; then
             if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/build.gradle.kts"; then
-              sed -i '0,/plugins *{/{s//plugins {\n    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false/}' "$ROOT/build.gradle.kts"
-              echo "Patched root build.gradle.kts with Compose plugin"
+              awk 'NR==1{print} NR==2{print "    id(\"org.jetbrains.kotlin.plugin.compose\") version \"2.0.21\" apply false"} NR>2{print}' "$ROOT/build.gradle.kts" > "$ROOT/build.gradle.kts.tmp" && mv "$ROOT/build.gradle.kts.tmp" "$ROOT/build.gradle.kts"
+              echo "Patched root build.gradle.kts"
             fi
           elif [ -f "$ROOT/build.gradle" ]; then
             if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/build.gradle"; then
-              sed -i "0,/plugins *{/{s//plugins {\\n    id 'org.jetbrains.kotlin.plugin.compose' version '2.0.21' apply false/}" "$ROOT/build.gradle"
-              echo "Patched root build.gradle with Compose plugin"
+              awk 'NR==1{print} NR==2{print "    id '\''org.jetbrains.kotlin.plugin.compose'\'' version '\''2.0.21'\'' apply false"} NR>2{print}' "$ROOT/build.gradle" > "$ROOT/build.gradle.tmp" && mv "$ROOT/build.gradle.tmp" "$ROOT/build.gradle"
+              echo "Patched root build.gradle"
             fi
           fi
+
           if [ -f "$ROOT/app/build.gradle.kts" ]; then
             if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/app/build.gradle.kts"; then
-              sed -i '0,/plugins *{/{s//plugins {\n    id("org.jetbrains.kotlin.plugin.compose")/}' "$ROOT/app/build.gradle.kts"
-              echo "Patched app/build.gradle.kts with Compose plugin"
+              awk 'NR==1{print} NR==2{print "    id(\"org.jetbrains.kotlin.plugin.compose\")"} NR>2{print}' "$ROOT/app/build.gradle.kts" > "$ROOT/app/build.gradle.kts.tmp" && mv "$ROOT/app/build.gradle.kts.tmp" "$ROOT/app/build.gradle.kts"
+              echo "Patched app/build.gradle.kts"
             fi
+            # удалить composeOptions { ... } если есть (Kotlin 2.x сам управляет)
             perl -0777 -pe 's/composeOptions\s*\{[^}]*\}//s' -i "$ROOT/app/build.gradle.kts" || true
           elif [ -f "$ROOT/app/build.gradle" ]; then
             if ! grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/app/build.gradle"; then
-              sed -i "0,/plugins *{/{s//plugins {\\n    id 'org.jetbrains.kotlin.plugin.compose'/}" "$ROOT/app/build.gradle"
-              echo "Patched app/build.gradle with Compose plugin"
+              awk 'NR==1{print} NR==2{print "    id '\''org.jetbrains.kotlin.plugin.compose'\''"} NR>2{print}' "$ROOT/app/build.gradle" > "$ROOT/app/build.gradle.tmp" && mv "$ROOT/app/build.gradle.tmp" "$ROOT/app/build.gradle"
+              echo "Patched app/build.gradle"
             fi
           fi
 
-      # --- Ensure Material Components (Theme.Material3.* in XML) ---
-      - name: Ensure Material Components dependency (Theme.Material3)
+      # 6) Добавить Material Components (нужен для Theme.Material3.* в XML)
+      - name: Ensure Material Components dependency
         run: |
           set -e
           ROOT="${{ steps.detect.outputs.root }}"
-          APP_KTS="$ROOT/app/build.gradle.kts"
-          APP_GROOVY="$ROOT/app/build.gradle"
-          insert_dep_kts() {
-            local f="$1"
-            if ! grep -q 'com.google.android.material:material' "$f"; then
-              sed -i '0,/dependencies\s*{/{s//dependencies {\n    implementation("com.google.android.material:material:1.12.0")/}' "$f"
-              echo "Added Material Components to $f"
-            else
-              echo "Material Components already present in $f"
+          if [ -f "$ROOT/app/build.gradle.kts" ]; then
+            if ! grep -q 'com.google.android.material:material' "$ROOT/app/build.gradle.kts"; then
+              awk '/dependencies *\{/{print; print "    implementation(\"com.google.android.material:material:1.12.0\")"; next}1' "$ROOT/app/build.gradle.kts" > "$ROOT/app/build.gradle.kts.tmp" && mv "$ROOT/app/build.gradle.kts.tmp" "$ROOT/app/build.gradle.kts"
+              echo "Added material to build.gradle.kts"
             fi
-          }
-          insert_dep_groovy() {
-            local f="$1"
-            if ! grep -q 'com.google.android.material:material' "$f"; then
-              sed -i "0,/dependencies\s*{/{s//dependencies {\\n    implementation 'com.google.android.material:material:1.12.0'/}" "$f"
-              echo "Added Material Components to $f"
-            else
-              echo "Material Components already present in $f"
+          elif [ -f "$ROOT/app/build.gradle" ]; then
+            if ! grep -q 'com.google.android.material:material' "$ROOT/app/build.gradle"; then
+              awk '/dependencies *\{/{print; print "    implementation '\''com.google.android.material:material:1.12.0'\''"; next}1' "$ROOT/app/build.gradle" > "$ROOT/app/build.gradle.tmp" && mv "$ROOT/app/build.gradle.tmp" "$ROOT/app/build.gradle"
+              echo "Added material to build.gradle"
             fi
-          }
-          if [ -f "$APP_KTS" ]; then
-            insert_dep_kts "$APP_KTS"; head -n 160 "$APP_KTS" || true
-          elif [ -f "$APP_GROOVY" ]; then
-            insert_dep_groovy "$APP_GROOVY"; head -n 160 "$APP_GROOVY" || true
           else
-            echo "app build.gradle* not found"; exit 1
+            echo "app build.gradle* not found"
+            exit 1
           fi
 
-      # --- Auto-create launcher icons if missing ---
+      # 7) Создать иконки лаунчера, если отсутствуют (без heredoc)
       - name: Ensure launcher icons (ic_launcher)
         run: |
           set -e
           ROOT="${{ steps.detect.outputs.root }}"
           RES="$ROOT/app/src/main/res"
-          if [ ! -d "$RES" ]; then
-            echo "No res/ folder at $RES"; exit 1
+          mkdir -p "$RES/mipmap-anydpi-v26" "$RES/drawable" "$RES/values"
+
+          # ic_launcher.xml
+          if [ ! -f "$RES/mipmap-anydpi-v26/ic_launcher.xml" ]; then
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
+              '    <background android:drawable="@color/ic_launcher_background"/>' \
+              '    <foreground android:drawable="@drawable/ic_launcher_foreground"/>' \
+              '</adaptive-icon>' > "$RES/mipmap-anydpi-v26/ic_launcher.xml"
           fi
-          MIP="$RES/mipmap-anydpi-v26"
-          DRW="$RES/drawable"
-          VAL="$RES/values"
-          mkdir -p "$MIP" "$DRW" "$VAL"
-          if [ ! -f "$MIP/ic_launcher.xml" ]; then
-            cat > "$MIP/ic_launcher.xml" << 'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/ic_launcher_background"/>
-    <foreground android:drawable="@drawable/ic_launcher_foreground"/>
-</adaptive-icon>
-EOF
+
+          # ic_launcher_round.xml
+          if [ ! -f "$RES/mipmap-anydpi-v26/ic_launcher_round.xml" ]; then
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+              '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' \
+              '    <background android:drawable="@color/ic_launcher_background"/>' \
+              '    <foreground android:drawable="@drawable/ic_launcher_foreground"/>' \
+              '</adaptive-icon>' > "$RES/mipmap-anydpi-v26/ic_launcher_round.xml"
           fi
-          if [ ! -f "$MIP/ic_launcher_round.xml" ]; then
-            cat > "$MIP/ic_launcher_round.xml" << 'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-    <background android:drawable="@color/ic_launcher_background"/>
-    <foreground android:drawable="@drawable/ic_launcher_foreground"/>
-</adaptive-icon>
-EOF
+
+          # ic_launcher_foreground.xml (простой вектор)
+          if [ ! -f "$RES/drawable/ic_launcher_foreground.xml" ]; then
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+              '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">' \
+              '  <path android:fillColor="#FFFFFF" android:fillAlpha="0.9" android:pathData="M20,30h68a8,8 0 0 1 8,8v40a8,8 0 0 1 -8,8H20a8,8 0 0 1 -8,-8V38a8,8 0 0 1 8,-8z"/>' \
+              '  <path android:fillColor="#3F51B5" android:pathData="M28,38h52a4,4 0 0 1 4,4v24a12,12 0 0 1 -12,12H28z"/>' \
+              '  <path android:fillColor="#FFFFFF" android:pathData="M36,48h36v4H36zM36,56h28v4H36zM36,64h22v4H36z"/>' \
+              '  <path android:fillColor="#FF4081" android:pathData="M70,28c6,8 10,14 10,18 0,6 -6,10 -10,10 -4,0 -10,-4 -10,-10 0,-4 4,-10 10,-18z"/>' \
+              '</vector>' > "$RES/drawable/ic_launcher_foreground.xml"
           fi
-          if [ ! -f "$DRW/ic_launcher_foreground.xml" ]; then
-            cat > "$DRW/ic_launcher_foreground.xml" << 'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-    <path android:fillColor="#FFFFFF" android:fillAlpha="0.9"
-          android:pathData="M20,30h68a8,8 0 0 1 8,8v40a8,8 0 0 1 -8,8H20a8,8 0 0 1 -8,-8V38a8,8 0 0 1 8,-8z"/>
-    <path android:fillColor="#3F51B5" android:pathData="M28,38h52a4,4 0 0 1 4,4v24a12,12 0 0 1 -12,12H28z"/>
-    <path android:fillColor="#FFFFFF" android:pathData="M36,48h36v4H36zM36,56h28v4H36zM36,64h22v4H36z"/>
-    <path android:fillColor="#FF4081" android:pathData="M70,28c6,8 10,14 10,18 0,6 -6,10 -10,10 -4,0 -10,-4 -10,-10 0,-4 4,-10 10,-18z"/>
-</vector>
-EOF
+
+          # ic_launcher_background.xml (цвет)
+          if [ ! -f "$RES/values/ic_launcher_background.xml" ]; then
+            printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' \
+              '<resources>' \
+              '  <color name="ic_launcher_background">#121212</color>' \
+              '</resources>' > "$RES/values/ic_launcher_background.xml"
           fi
-          if [ ! -f "$VAL/ic_launcher_background.xml" ]; then
-            cat > "$VAL/ic_launcher_background.xml" << 'EOF'
-<?xml version="1.0" encoding="utf-8"?>
-<resources>
-    <color name="ic_launcher_background">#121212</color>
-</resources>
-EOF
-          fi
+
           echo "Launcher icon resources ensured."
 
+      # 8) Сборка
       - name: Build APK (release)
         working-directory: ${{ steps.detect.outputs.root }}
         run: |
@@ -209,6 +196,7 @@ EOF
             gradle :app:assembleRelease --no-daemon
           fi
 
+      # 9) Артефакт
       - name: Upload APK artifact
         if: success()
         uses: actions/upload-artifact@v4
