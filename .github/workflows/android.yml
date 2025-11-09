@@ -1,4 +1,4 @@
-name: Android CI (Stikhi direct build)
+name: Android CI (auto-unzip & build from ZIP)
 
 on:
   push:
@@ -13,69 +13,60 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Если в корне лежит Stikhi.zip — разархивируем в папку Stikhi
+      # Если в репозитории есть Stikhi.zip — распакуем его в ./project
       - name: Unzip Stikhi.zip (if present)
+        if: ${{ hashFiles('Stikhi.zip') != '' }}
         run: |
-          set -e
-          if [ -f "Stikhi.zip" ]; then
-            rm -rf Stikhi
-            unzip -q Stikhi.zip -d Stikhi
-          fi
-          echo "Workspace tree:"
-          find . -maxdepth 3 -type f -name "settings.gradle.kts" -o -name "build.gradle" -o -name "build.gradle.kts" | sed 's/^/  - /'
+          echo "Found Stikhi.zip, unzipping to ./project ..."
+          rm -rf project
+          unzip -o Stikhi.zip -d project
+          echo "Unzipped tree:"
+          ls -la
+          echo "----"
+          ls -la project || true
+          echo "----"
+          find project -maxdepth 2 -type d -print
 
-      # Находим корень Android-проекта (где есть settings.gradle.kts)
+      # Ищем корень Gradle-проекта (где лежит settings.gradle(.kts) / gradlew)
       - name: Detect Android project dir
         id: detect
         shell: bash
         run: |
           set -e
-          # кандидаты: корень или Stikhi/, также любые подкаталоги
-          CANDIDATES=$(find . -maxdepth 4 -type f -name "settings.gradle.kts" | sed 's#/settings.gradle.kts##')
-          echo "Found candidates:"
-          echo "$CANDIDATES" | sed 's/^/  - /'
-          if [ -z "$CANDIDATES" ]; then
-            echo "Не нашёл корень проекта. Убедись, что в репозитории есть settings.gradle.kts (внутри zip или напрямую)."
+          CANDS=$(find . project -maxdepth 3 -type f \( -name "settings.gradle.kts" -o -name "settings.gradle" -o -name "gradlew" \) -printf '%h\n' | sort -u)
+          echo "Candidates:"; echo "$CANDS"
+          if [ -z "$CANDS" ]; then
+            echo "No Gradle project root found. Check the unzip step."
             exit 1
           fi
-          # Берём первый
-          PROJECT_DIR=$(echo "$CANDIDATES" | head -n1)
-          echo "Project dir: $PROJECT_DIR"
-          echo "project_dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
+          # Берём первый кандидат
+          PROJDIR=$(echo "$CANDS" | head -n1)
+          echo "Using project dir: $PROJDIR"
+          echo "PROJECT_DIR=$PROJDIR" >> $GITHUB_ENV
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Install SDK packages
-        run: |
-          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" > /dev/null
-          yes | sdkmanager --licenses > /dev/null
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses
 
-      # Скачиваем Gradle 8.7 и используем его напрямую (без wrapper)
-      - name: Download Gradle 8.7
-        run: |
-          curl -sL https://services.gradle.org/distributions/gradle-8.7-bin.zip -o gradle.zip
-          unzip -q gradle.zip -d $HOME
-          echo "GRADLE_HOME=$HOME/gradle-8.7" >> $GITHUB_ENV
-          echo "$HOME/gradle-8.7/bin" >> $GITHUB_PATH
+      - name: Make Gradle wrapper executable
+        run: chmod +x "${{ env.PROJECT_DIR }}/gradlew"
 
-      - name: Build APK
-        working-directory: ${{ steps.detect.outputs.project_dir }}
-        run: |
-          gradle --version
-          # Сборка debug APK
-          gradle assembleDebug --no-daemon --stacktrace
+      - name: Build APK (release)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: ./gradlew :app:assembleRelease --no-daemon
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Stikhi-debug-apk
+          name: Stikhi-APK
           path: |
-            ${{ steps.detect.outputs.project_dir }}/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
+            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/release/*.apk
+            ${{ env.PROJECT_DIR }}/app/build/outputs/apk/*/release/*.apk
