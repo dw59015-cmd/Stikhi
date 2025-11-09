@@ -54,19 +54,32 @@ jobs:
         run: yes | sdkmanager --licenses
 
       # Универсальная сборка: если есть wrapper — используем его; иначе скачиваем Gradle и собираем
-      - name: Build APK (wrapper or standalone Gradle)
+      - name: Build APK (robust: prefer wrapper, fallback to standalone Gradle)
         shell: bash
         run: |
           set -e
           cd "$PROJECT_DIR"
 
+          # 1) Попробуем gradle wrapper, но аккуратно (не валим job, если он битый)
+          USE_WRAPPER=false
           if [ -f "./gradlew" ]; then
-            echo "Gradle wrapper found. Using ./gradlew"
-            chmod +x ./gradlew
+            chmod +x ./gradlew || true
+            if ./gradlew -v >/dev/null 2>&1; then
+              echo "Using Gradle WRAPPER"
+              USE_WRAPPER=true
+            else
+              echo "Wrapper exists but is broken — will fallback to standalone Gradle."
+            fi
+          else
+            echo "Wrapper not found — will use standalone Gradle."
+          fi
+
+          if [ "$USE_WRAPPER" = true ]; then
             ./gradlew :app:assembleRelease --no-daemon
           else
-            echo "Gradle wrapper NOT found. Downloading standalone Gradle ..."
+            # 2) Fallback: скачать Gradle и собрать
             GRADLE_VERSION=8.9
+            echo "Downloading Gradle ${GRADLE_VERSION}..."
             wget -q https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip
             unzip -q gradle-${GRADLE_VERSION}-bin.zip
             export PATH="$PWD/gradle-${GRADLE_VERSION}/bin:$PATH"
