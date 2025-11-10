@@ -11,19 +11,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
+        
       - name: Pick ZIP by priority
         id: pick
         run: |
           set -e
-          for Z in Stikhi_v1_3_androidx.zip Stikhi_v1_3_patched.zip Stikhi_v1_2.zip; do
+          # Ищем по приоритету. Добавил больше масок имён.
+          for Z in \
+            Stikhi_v1_3_androidx.zip \
+            Stikhi_v1_3_patched.zip \
+            Stikhi_v1_2.zip \
+            Stikhi_v1_2*.zip \
+            Stikhi.zip \
+            *.zip
+          do
             if [ -f "$Z" ]; then
               echo "zip=$Z" >> "$GITHUB_OUTPUT"
-              echo "Chosen $Z"
+              echo "Chosen archive: $Z"
               exit 0
             fi
           done
-          echo "No ZIP found in repo root"; ls -la; exit 1
+          echo "No ZIP found in repo root. Current files:" 
+          ls -la
+          exit 1
 
       - name: Unzip
         run: |
