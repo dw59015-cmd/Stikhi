@@ -1,143 +1,100 @@
-name: Android CI (diagnostic)
+name: Android CI (ZIP build)
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
   workflow_dispatch:
 
 jobs:
-  inspect_and_check:
+  build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        
-      - name: Pick ZIP by priority
-        id: pick
-        run: |
-          set -e
-          # Ищем по приоритету. Добавил больше масок имён.
-          for Z in \
-            Stikhi_v1_3_androidx.zip \
-            Stikhi_v1_3_patched.zip \
-            Stikhi_v1_2.zip \
-            Stikhi_v1_2*.zip \
-            Stikhi.zip \
-            *.zip
-          do
-            if [ -f "$Z" ]; then
-              echo "zip=$Z" >> "$GITHUB_OUTPUT"
-              echo "Chosen archive: $Z"
-              exit 0
-            fi
-          done
-          echo "No ZIP found in repo root. Current files:" 
-          ls -la
-          exit 1
 
-      - name: Unzip
-        run: |
-          set -e
-          rm -rf repo && mkdir repo
-          unzip -o "${{ steps.pick.outputs.zip }}" -d repo
-          echo "Top of repo/:"; find repo -maxdepth 2 -type f | sort
+      - name: Show repo root
+        run: ls -la
 
-      - name: Detect Gradle root
-        id: detect
-        run: |
-          set -e
-          ROOT="$(dirname "$(find repo -maxdepth 2 -type f -name 'settings.gradle*' | head -n1)")"
-          [ -z "$ROOT" ] && echo "settings.gradle(.kts) not found" && exit 1
-          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
-          echo "Detected root: $ROOT"
+      - name: Ensure unzip
+        run: sudo apt-get update && sudo apt-get install -y unzip
 
-      - name: Ensure gradle.properties (AndroidX, JVM)
+      - name: Unzip project from ZIP
+        id: unzip
+        shell: bash
         run: |
-          set -e
-          ROOT="${{ steps.detect.outputs.root }}"
-          GP="$ROOT/gradle.properties"
-          if [ ! -f "$GP" ]; then
-            printf '%s\n' \
-              'android.useAndroidX=true' \
-              'android.enableJetifier=true' \
-              'org.gradle.jvmargs=-Xmx3g -Dkotlin.daemon.jvm.options=-Xmx1g' \
-              'kotlin.code.style=official' \
-              'org.gradle.warning.mode=all' > "$GP"
-            echo "Created $GP"
+          set -euo pipefail
+          ZIP=$(ls -1 *.zip | head -n1 || true)
+          if [ -z "$ZIP" ]; then
+            echo "No *.zip found in repo root"; exit 1
+          fi
+          echo "Using ZIP: $ZIP"
+          rm -rf proj && mkdir proj
+          unzip -q "$ZIP" -d proj
+
+          # найти корень проекта по наличию settings.gradle(.kts) или build.gradle(.kts)
+          cd proj
+          ROOT_CANDIDATE=$( \
+            find . -maxdepth 2 \
+              \( -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "build.gradle" -o -name "build.gradle.kts" \) \
+              | head -n1 | xargs -r dirname || true )
+          if [ -z "$ROOT_CANDIDATE" ]; then
+            echo "Gradle root not found inside ZIP"; exit 1
+          fi
+
+          echo "Detected root: $ROOT_CANDIDATE"
+          # Если корень не '.', поднимем содержимое на уровень proj/
+          if [ "$ROOT_CANDIDATE" != "." ]; then
+            shopt -s dotglob
+            mkdir -p __m && mv "$ROOT_CANDIDATE"/* __m/ && rm -rf ./* && mv __m/* . && rmdir __m || true
+          fi
+          cd ..
+
+          echo "PROJECT_DIR=$GITHUB_WORKSPACE/proj" >> $GITHUB_ENV
+
+      - name: Print project tree (top 3 levels)
+        run: |
+          cd "$PROJECT_DIR"
+          find . -maxdepth 3 -type f | sed 's/^/  /'
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Detect Gradle wrapper
+        id: gw
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          if [ -x "./gradlew" ]; then
+            echo "use_wrapper=true" >> $GITHUB_OUTPUT
           else
-            echo "Existing $GP:"; cat "$GP"
+            echo "use_wrapper=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Patch Compose plugin if missing (Kotlin 2.x)
-        run: |
-          set -e
-          ROOT="${{ steps.detect.outputs.root }}"
-          # root build
-          if [ -f "$ROOT/build.gradle.kts" ]; then
-            grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/build.gradle.kts" || \
-              awk 'NR==1{print} NR==2{print "    id(\"org.jetbrains.kotlin.plugin.compose\") version \"2.0.21\" apply false"} NR>2{print}' \
-              "$ROOT/build.gradle.kts" > "$ROOT/build.gradle.kts.tmp" && mv "$ROOT/build.gradle.kts.tmp" "$ROOT/build.gradle.kts"
-          elif [ -f "$ROOT/build.gradle" ]; then
-            grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/build.gradle" || \
-              awk 'NR==1{print} NR==2{print "    id '\''org.jetbrains.kotlin.plugin.compose'\'' version '\''2.0.21'\'' apply false"} NR>2{print}' \
-              "$ROOT/build.gradle" > "$ROOT/build.gradle.tmp" && mv "$ROOT/build.gradle.tmp" "$ROOT/build.gradle"
-          fi
-          # app build
-          if [ -f "$ROOT/app/build.gradle.kts" ]; then
-            grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/app/build.gradle.kts" || \
-              awk 'NR==1{print} NR==2{print "    id(\"org.jetbrains.kotlin.plugin.compose\")"} NR>2{print}' \
-              "$ROOT/app/build.gradle.kts" > "$ROOT/app/build.gradle.kts.tmp" && mv "$ROOT/app/build.gradle.kts.tmp" "$ROOT/app/build.gradle.kts"
-            perl -0777 -pe 's/composeOptions\s*\{[^}]*\}//s' -i "$ROOT/app/build.gradle.kts" || true
-          elif [ -f "$ROOT/app/build.gradle" ]; then
-            grep -q 'org.jetbrains.kotlin.plugin.compose' "$ROOT/app/build.gradle" || \
-              awk 'NR==1{print} NR==2{print "    id '\''org.jetbrains.kotlin.plugin.compose'\''"} NR>2{print}' \
-              "$ROOT/app/build.gradle" > "$ROOT/app/build.gradle.tmp" && mv "$ROOT/app/build.gradle.tmp" "$ROOT/app/build.gradle"
-          fi
-          echo "Compose plugin ensured."
+      - name: Setup Gradle (no wrapper)
+        if: steps.gw.outputs.use_wrapper == 'false'
+        uses: gradle/actions/setup-gradle@v3
 
-      - name: Ensure Material Components dependency (Theme.Material3)
+      - name: Make wrapper executable
+        if: steps.gw.outputs.use_wrapper == 'true'
+        run: chmod +x "$PROJECT_DIR/gradlew"
+
+      - name: Build APK (release)
+        working-directory: ${{ env.PROJECT_DIR }}
         run: |
           set -e
-          ROOT="${{ steps.detect.outputs.root }}"
-          if [ -f "$ROOT/app/build.gradle.kts" ]; then
-            grep -q 'com.google.android.material:material' "$ROOT/app/build.gradle.kts" || \
-              awk '/dependencies *\{/{print;print "    implementation(\"com.google.android.material:material:1.12.0\")";next}1' \
-              "$ROOT/app/build.gradle.kts" > "$ROOT/app/build.gradle.kts.tmp" && mv "$ROOT/app/build.gradle.kts.tmp" "$ROOT/app/build.gradle.kts"
-          elif [ -f "$ROOT/app/build.gradle" ]; then
-            grep -q 'com.google.android.material:material' "$ROOT/app/build.gradle" || \
-              awk '/dependencies *\{/{print;print "    implementation '\''com.google.android.material:material:1.12.0'\''";next}1' \
-              "$ROOT/app/build.gradle" > "$ROOT/app/build.gradle.tmp" && mv "$ROOT/app/build.gradle.tmp" "$ROOT/app/build.gradle"
+          if [ "${{ steps.gw.outputs.use_wrapper }}" = "true" ]; then
+            ./gradlew :app:assembleRelease --no-daemon
           else
-            echo "app build.gradle* not found"; exit 1
-          fi
-          echo "Material dependency ensured."
-
-      - name: Ensure launcher icons (ic_launcher)
-        run: |
-          set -e
-          ROOT="${{ steps.detect.outputs.root }}"
-          RES="$ROOT/app/src/main/res"
-          mkdir -p "$RES/mipmap-anydpi-v26" "$RES/drawable" "$RES/values"
-          [ -f "$RES/mipmap-anydpi-v26/ic_launcher.xml" ] || printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">' '  <background android:drawable="@color/ic_launcher_background"/>' '  <foreground android:drawable="@drawable/ic_launcher_foreground"/>' '</adaptive-icon>' > "$RES/mipmap-anydpi-v26/ic_launcher.xml"
-          [ -f "$RES/mipmap-anydpi-v26/ic_launcher_round.xml" ] || cp "$RES/mipmap-anydpi-v26/ic_launcher.xml" "$RES/mipmap-anydpi-v26/ic_launcher_round.xml"
-          [ -f "$RES/drawable/ic_launcher_foreground.xml" ] || printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">' '  <path android:fillColor="#FFFFFF" android:fillAlpha="0.9" android:pathData="M20,30h68a8,8 0 0 1 8,8v40a8,8 0 0 1 -8,8H20a8,8 0 0 1 -8,-8V38a8,8 0 0 1 8,-8z"/>' '  <path android:fillColor="#3F51B5" android:pathData="M28,38h52a4,4 0 0 1 4,4v24a12,12 0 0 1 -12,12H28z"/>' '  <path android:fillColor="#FFFFFF" android:pathData="M36,48h36v4H36zM36,56h28v4H36zM36,64h22v4H36z"/>' '  <path android:fillColor="#FF4081" android:pathData="M70,28c6,8 10,14 10,18 0,6 -6,10 -10,10 -4,0 -10,-4 -10,-10 0,-4 4,-10 10,-18z"/>' '</vector>' > "$RES/drawable/ic_launcher_foreground.xml"
-          [ -f "$RES/values/ic_launcher_background.xml" ] || printf '%s\n' '<?xml version="1.0" encoding="utf-8"?>' '<resources>' '  <color name="ic_launcher_background">#121212</color>' '</resources>' > "$RES/values/ic_launcher_background.xml"
-          echo "Launcher icons ensured."
-
-      - name: Diagnostic Gradle run (no build)
-        id: diag
-        working-directory: ${{ steps.detect.outputs.root }}
-        run: |
-          set -e
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            ./gradlew help --no-daemon --stacktrace --warning-mode all | tee ../gradle_help.log
-          else
-            gradle help --no-daemon --stacktrace --warning-mode all | tee ../gradle_help.log
+            gradle :app:assembleRelease --no-daemon
           fi
 
-      - name: Upload diagnostic log
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gradle-help-log
-          path: gradle_help.log
+          name: Stikhi-release-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/**/release/*.apk
+          if-no-files-found: warn
